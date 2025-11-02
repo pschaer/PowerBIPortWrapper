@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace PowerBIPortWrapper.Services
 {
-    public class TcpProxyService
+    public class TcpProxyService : IDisposable
     {
         private TcpListener _listener;
         private CancellationTokenSource _cancellationTokenSource;
@@ -38,6 +38,7 @@ namespace PowerBIPortWrapper.Services
             try
             {
                 var ipAddress = allowRemote ? IPAddress.Any : IPAddress.Loopback;
+
                 _listener = new TcpListener(ipAddress, listenPort);
                 _listener.Start();
                 _isRunning = true;
@@ -84,12 +85,13 @@ namespace PowerBIPortWrapper.Services
                 {
                     var client = await _listener.AcceptTcpClientAsync();
                     Interlocked.Increment(ref _activeConnections);
-                    Log($"Client connected from {client.Client.RemoteEndPoint} (Active connections: {_activeConnections})");
+                    Log($"Client connected from {client.Client.RemoteEndPoint} (Active: {_activeConnections})");
 
                     _ = Task.Run(() => HandleClientAsync(client, cancellationToken), cancellationToken);
                 }
                 catch (ObjectDisposedException)
                 {
+                    // Listener was stopped - normal shutdown
                     break;
                 }
                 catch (Exception ex)
@@ -110,8 +112,11 @@ namespace PowerBIPortWrapper.Services
             {
                 using (client)
                 {
-                    target = new TcpClient();
-                    target.NoDelay = true;
+                    target = new TcpClient
+                    {
+                        NoDelay = true
+                    };
+
                     client.NoDelay = true;
 
                     await target.ConnectAsync("localhost", _targetPort);
@@ -138,8 +143,8 @@ namespace PowerBIPortWrapper.Services
             finally
             {
                 Interlocked.Decrement(ref _activeConnections);
-                Log($"Client disconnected (Active connections: {_activeConnections})");
-                target?.Close();
+                Log($"Client disconnected (Active: {_activeConnections})");
+                target?.Dispose();
             }
         }
 
@@ -166,18 +171,19 @@ namespace PowerBIPortWrapper.Services
 
         private void Log(string message)
         {
-            OnLog?.Invoke(this, $"[{DateTime.Now:HH:mm:ss}] {message}");
+            OnLog?.Invoke(this, message);
         }
 
         private void LogError(string message)
         {
-            OnError?.Invoke(this, $"[{DateTime.Now:HH:mm:ss}] ERROR: {message}");
+            OnError?.Invoke(this, $"ERROR: {message}");
         }
 
         public void Dispose()
         {
             Stop();
             _cancellationTokenSource?.Dispose();
+            _listener?.Stop();
         }
     }
 }

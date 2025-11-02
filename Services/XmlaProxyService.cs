@@ -1,4 +1,8 @@
-﻿using System;
+﻿// NOTE: This file is reserved for future v0.2 XMLA protocol implementation
+// Currently not in use - v0.1 uses TcpProxyService for simple TCP forwarding
+// DO NOT DELETE - will be needed for database name abstraction feature
+
+using System;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;

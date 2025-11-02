@@ -26,35 +26,26 @@ namespace PowerBIPortWrapper.Services
 
             if (!Directory.Exists(_workspacesPath))
             {
-                System.Diagnostics.Debug.WriteLine("Workspaces path does not exist");
                 return instances;
             }
 
             try
             {
                 var workspaceDirs = Directory.GetDirectories(_workspacesPath);
-                System.Diagnostics.Debug.WriteLine($"Found {workspaceDirs.Length} workspace directories");
 
                 foreach (var workspaceDir in workspaceDirs)
                 {
                     try
                     {
                         var portFile = Path.Combine(workspaceDir, @"Data\msmdsrv.port.txt");
-                        System.Diagnostics.Debug.WriteLine($"Checking: {portFile}");
 
                         if (File.Exists(portFile))
                         {
-                            // Read with proper encoding detection
                             string portText = ReadPortFile(portFile);
-                            System.Diagnostics.Debug.WriteLine($"Port file content: '{portText}'");
 
                             if (int.TryParse(portText, out int port))
                             {
-                                System.Diagnostics.Debug.WriteLine($"Parsed port: {port}");
-
-                                // Get database name by connecting to the instance
                                 string databaseName = GetDatabaseName(port);
-                                System.Diagnostics.Debug.WriteLine($"Database name: {databaseName ?? "(null)"}");
 
                                 var instance = new PowerBIInstance
                                 {
@@ -63,71 +54,60 @@ namespace PowerBIPortWrapper.Services
                                     DatabaseName = databaseName,
                                     LastModified = Directory.GetLastWriteTime(workspaceDir),
                                     FilePath = workspaceDir,
-                                    FileName = $"Workspace-{Path.GetFileName(workspaceDir).Substring(0, Math.Min(8, Path.GetFileName(workspaceDir).Length))}"
+                                    FileName = GetFriendlyName(workspaceDir)
                                 };
 
                                 instances.Add(instance);
-                                System.Diagnostics.Debug.WriteLine($"Added instance: {instance.FileName}");
                             }
-                            else
-                            {
-                                System.Diagnostics.Debug.WriteLine($"Failed to parse port from: '{portText}'");
-                            }
-                        }
-                        else
-                        {
-                            System.Diagnostics.Debug.WriteLine($"Port file does not exist: {portFile}");
                         }
                     }
                     catch (Exception ex)
                     {
-                        System.Diagnostics.Debug.WriteLine($"Error processing workspace {workspaceDir}: {ex.Message}");
+                        // Skip this workspace if we can't process it
+                        System.Diagnostics.Debug.WriteLine($"Error processing workspace: {ex.Message}");
                     }
                 }
 
-                instances = instances.OrderByDescending(i => i.LastModified).ToList();
-                System.Diagnostics.Debug.WriteLine($"Returning {instances.Count} instances");
+                return instances.OrderByDescending(i => i.LastModified).ToList();
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Error detecting instances: {ex.Message}");
+                return instances;
             }
-
-            return instances;
         }
 
         private string ReadPortFile(string portFile)
         {
+            // Try UTF-16 LE (Little Endian) first - Power BI's encoding
             try
             {
-                // Try UTF-16 LE (Little Endian) first - this is what Power BI uses
                 var content = File.ReadAllText(portFile, Encoding.Unicode);
                 var trimmed = content.Trim('\0', ' ', '\r', '\n', '\t');
 
-                if (!string.IsNullOrEmpty(trimmed) && trimmed.All(c => char.IsDigit(c)))
+                if (!string.IsNullOrEmpty(trimmed) && trimmed.All(char.IsDigit))
                 {
                     return trimmed;
                 }
             }
             catch { }
 
+            // Fallback to UTF-8
             try
             {
-                // Fallback to UTF-8
                 var content = File.ReadAllText(portFile, Encoding.UTF8);
                 return content.Trim('\0', ' ', '\r', '\n', '\t');
             }
             catch { }
 
+            // Last resort - default encoding
             try
             {
-                // Last resort - default encoding
                 var content = File.ReadAllText(portFile);
                 return content.Trim('\0', ' ', '\r', '\n', '\t');
             }
-            catch (Exception ex)
+            catch
             {
-                System.Diagnostics.Debug.WriteLine($"Error reading port file: {ex.Message}");
                 return null;
             }
         }
@@ -142,15 +122,16 @@ namespace PowerBIPortWrapper.Services
                 {
                     connection.Open();
 
-                    // Query the catalog to get database name
-                    var cmd = connection.CreateCommand();
-                    cmd.CommandText = "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS";
-
-                    using (var reader = cmd.ExecuteReader())
+                    using (var cmd = connection.CreateCommand())
                     {
-                        if (reader.Read())
+                        cmd.CommandText = "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS";
+
+                        using (var reader = cmd.ExecuteReader())
                         {
-                            return reader.GetString(0);
+                            if (reader.Read())
+                            {
+                                return reader.GetString(0);
+                            }
                         }
                     }
                 }
@@ -161,6 +142,19 @@ namespace PowerBIPortWrapper.Services
             }
 
             return null;
+        }
+
+        private string GetFriendlyName(string workspaceDir)
+        {
+            var dirName = Path.GetFileName(workspaceDir);
+
+            // Extract just the first part of the workspace ID for display
+            if (dirName.Length > 20)
+            {
+                return $"Workspace-{dirName.Substring(0, 8)}";
+            }
+
+            return $"Workspace-{dirName}";
         }
 
         public bool IsWorkspacePathValid()

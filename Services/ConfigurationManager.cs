@@ -8,16 +8,19 @@ namespace PowerBIPortWrapper.Services
     public class ConfigurationManager
     {
         private readonly string _configFilePath;
+        private readonly string _logFilePath;
+        private readonly string _appDataPath;
 
         public ConfigurationManager()
         {
-            var appDataPath = Path.Combine(
+            _appDataPath = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                 "PowerBIPortWrapper"
             );
 
-            Directory.CreateDirectory(appDataPath);
-            _configFilePath = Path.Combine(appDataPath, "config.json");
+            Directory.CreateDirectory(_appDataPath);
+            _configFilePath = Path.Combine(_appDataPath, "config.json");
+            _logFilePath = Path.Combine(_appDataPath, "log.txt");
         }
 
         public ProxyConfiguration LoadConfiguration()
@@ -35,7 +38,6 @@ namespace PowerBIPortWrapper.Services
                 System.Diagnostics.Debug.WriteLine($"Error loading configuration: {ex.Message}");
             }
 
-            // Return default configuration
             return new ProxyConfiguration();
         }
 
@@ -53,9 +55,8 @@ namespace PowerBIPortWrapper.Services
             }
         }
 
-        public string GetConfigFilePath()
-        {
-            return _configFilePath;
-        }
+        public string GetConfigFilePath() => _configFilePath;
+        public string GetLogFilePath() => _logFilePath;
+        public string GetAppDataPath() => _appDataPath;
     }
 }
