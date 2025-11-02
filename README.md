@@ -23,8 +23,9 @@ Power BI Desktop uses dynamic ports that change with each session, making it dif
 ## 📋 Requirements
 
 - Windows 10/11
-- .NET 8.0 Runtime (Desktop) - [Download here](https://dotnet.microsoft.com/download/dotnet/8.0)
 - Power BI Desktop (any version)
+
+**Note:** No additional software installation required - .NET runtime is included.
 
 ## 🚀 Quick Start
 
