@@ -13,10 +13,12 @@ namespace PowerBIPortWrapper.Services
         private int _targetPort;
         private int _listenPort;
         private bool _isRunning;
+        private int _activeConnections;
 
         public bool IsRunning => _isRunning;
         public int ListenPort => _listenPort;
         public int TargetPort => _targetPort;
+        public int ActiveConnections => _activeConnections;
 
         public event EventHandler<string> OnLog;
         public event EventHandler<string> OnError;
@@ -30,20 +32,20 @@ namespace PowerBIPortWrapper.Services
 
             _listenPort = listenPort;
             _targetPort = targetPort;
+            _activeConnections = 0;
             _cancellationTokenSource = new CancellationTokenSource();
 
             try
             {
-                // Bind to all interfaces if remote access is allowed, otherwise localhost only
                 var ipAddress = allowRemote ? IPAddress.Any : IPAddress.Loopback;
                 _listener = new TcpListener(ipAddress, listenPort);
                 _listener.Start();
                 _isRunning = true;
 
-                Log($"Proxy started on port {listenPort}, forwarding to port {targetPort}");
-                Log($"Network access: {(allowRemote ? "Enabled" : "Localhost only")}");
+                Log($"TCP Proxy started on port {listenPort}");
+                Log($"Forwarding to localhost:{targetPort}");
+                Log($"Network access: {(allowRemote ? "Enabled (accessible from network)" : "Disabled (localhost only)")}");
 
-                // Accept connections in background
                 _ = Task.Run(() => AcceptClientsAsync(_cancellationTokenSource.Token));
             }
             catch (Exception ex)
@@ -66,7 +68,6 @@ namespace PowerBIPortWrapper.Services
                 _cancellationTokenSource?.Cancel();
                 _listener?.Stop();
                 _isRunning = false;
-
                 Log("Proxy stopped");
             }
             catch (Exception ex)
@@ -82,14 +83,13 @@ namespace PowerBIPortWrapper.Services
                 try
                 {
                     var client = await _listener.AcceptTcpClientAsync();
-                    Log($"Client connected from {client.Client.RemoteEndPoint}");
+                    Interlocked.Increment(ref _activeConnections);
+                    Log($"Client connected from {client.Client.RemoteEndPoint} (Active connections: {_activeConnections})");
 
-                    // Handle each client in a separate task
                     _ = Task.Run(() => HandleClientAsync(client, cancellationToken), cancellationToken);
                 }
                 catch (ObjectDisposedException)
                 {
-                    // Listener was stopped
                     break;
                 }
                 catch (Exception ex)
@@ -110,25 +110,21 @@ namespace PowerBIPortWrapper.Services
             {
                 using (client)
                 {
-                    // Connect to target
                     target = new TcpClient();
-                    await target.ConnectAsync("localhost", _targetPort);
+                    target.NoDelay = true;
+                    client.NoDelay = true;
 
-                    Log($"Established connection to target port {_targetPort}");
+                    await target.ConnectAsync("localhost", _targetPort);
 
                     using (target)
                     {
                         var clientStream = client.GetStream();
                         var targetStream = target.GetStream();
 
-                        // Bidirectional copy
                         var clientToTarget = CopyStreamAsync(clientStream, targetStream, cancellationToken);
                         var targetToClient = CopyStreamAsync(targetStream, clientStream, cancellationToken);
 
-                        // Wait for either direction to complete
                         await Task.WhenAny(clientToTarget, targetToClient);
-
-                        Log("Client disconnected");
                     }
                 }
             }
@@ -136,11 +132,13 @@ namespace PowerBIPortWrapper.Services
             {
                 if (!cancellationToken.IsCancellationRequested)
                 {
-                    LogError($"Error handling client: {ex.Message}");
+                    LogError($"Connection error: {ex.Message}");
                 }
             }
             finally
             {
+                Interlocked.Decrement(ref _activeConnections);
+                Log($"Client disconnected (Active connections: {_activeConnections})");
                 target?.Close();
             }
         }
@@ -148,19 +146,21 @@ namespace PowerBIPortWrapper.Services
         private async Task CopyStreamAsync(NetworkStream source, NetworkStream destination, CancellationToken cancellationToken)
         {
             byte[] buffer = new byte[8192];
-            int bytesRead;
 
             try
             {
-                while ((bytesRead = await source.ReadAsync(buffer, 0, buffer.Length, cancellationToken)) > 0)
+                while (!cancellationToken.IsCancellationRequested)
                 {
+                    int bytesRead = await source.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
+                    if (bytesRead == 0) break;
+
                     await destination.WriteAsync(buffer, 0, bytesRead, cancellationToken);
                     await destination.FlushAsync(cancellationToken);
                 }
             }
             catch (Exception)
             {
-                // Connection closed or error - this is normal
+                // Connection closed - normal operation
             }
         }
 
@@ -172,6 +172,12 @@ namespace PowerBIPortWrapper.Services
         private void LogError(string message)
         {
             OnError?.Invoke(this, $"[{DateTime.Now:HH:mm:ss}] ERROR: {message}");
+        }
+
+        public void Dispose()
+        {
+            Stop();
+            _cancellationTokenSource?.Dispose();
         }
     }
 }

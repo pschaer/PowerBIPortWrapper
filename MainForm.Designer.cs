@@ -201,7 +201,6 @@
             buttonDebug.TabIndex = 9;
             buttonDebug.Text = "Debug Path";
             buttonDebug.UseVisualStyleBackColor = true;
-            buttonDebug.Click += this.buttonDebug_Click;
             // 
             // MainForm
             // 

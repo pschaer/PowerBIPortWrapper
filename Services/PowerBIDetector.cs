@@ -2,8 +2,9 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using PowerBIPortWrapper.Models;
+using System.Text;
 using Microsoft.AnalysisServices.AdomdClient;
+using PowerBIPortWrapper.Models;
 
 namespace PowerBIPortWrapper.Services
 {
@@ -25,26 +26,35 @@ namespace PowerBIPortWrapper.Services
 
             if (!Directory.Exists(_workspacesPath))
             {
+                System.Diagnostics.Debug.WriteLine("Workspaces path does not exist");
                 return instances;
             }
 
             try
             {
                 var workspaceDirs = Directory.GetDirectories(_workspacesPath);
+                System.Diagnostics.Debug.WriteLine($"Found {workspaceDirs.Length} workspace directories");
 
                 foreach (var workspaceDir in workspaceDirs)
                 {
                     try
                     {
                         var portFile = Path.Combine(workspaceDir, @"Data\msmdsrv.port.txt");
+                        System.Diagnostics.Debug.WriteLine($"Checking: {portFile}");
 
                         if (File.Exists(portFile))
                         {
-                            var portText = File.ReadAllText(portFile).Trim();
+                            // Read with proper encoding detection
+                            string portText = ReadPortFile(portFile);
+                            System.Diagnostics.Debug.WriteLine($"Port file content: '{portText}'");
+
                             if (int.TryParse(portText, out int port))
                             {
+                                System.Diagnostics.Debug.WriteLine($"Parsed port: {port}");
+
                                 // Get database name by connecting to the instance
                                 string databaseName = GetDatabaseName(port);
+                                System.Diagnostics.Debug.WriteLine($"Database name: {databaseName ?? "(null)"}");
 
                                 var instance = new PowerBIInstance
                                 {
@@ -57,7 +67,16 @@ namespace PowerBIPortWrapper.Services
                                 };
 
                                 instances.Add(instance);
+                                System.Diagnostics.Debug.WriteLine($"Added instance: {instance.FileName}");
                             }
+                            else
+                            {
+                                System.Diagnostics.Debug.WriteLine($"Failed to parse port from: '{portText}'");
+                            }
+                        }
+                        else
+                        {
+                            System.Diagnostics.Debug.WriteLine($"Port file does not exist: {portFile}");
                         }
                     }
                     catch (Exception ex)
@@ -67,6 +86,7 @@ namespace PowerBIPortWrapper.Services
                 }
 
                 instances = instances.OrderByDescending(i => i.LastModified).ToList();
+                System.Diagnostics.Debug.WriteLine($"Returning {instances.Count} instances");
             }
             catch (Exception ex)
             {
@@ -74,6 +94,42 @@ namespace PowerBIPortWrapper.Services
             }
 
             return instances;
+        }
+
+        private string ReadPortFile(string portFile)
+        {
+            try
+            {
+                // Try UTF-16 LE (Little Endian) first - this is what Power BI uses
+                var content = File.ReadAllText(portFile, Encoding.Unicode);
+                var trimmed = content.Trim('\0', ' ', '\r', '\n', '\t');
+
+                if (!string.IsNullOrEmpty(trimmed) && trimmed.All(c => char.IsDigit(c)))
+                {
+                    return trimmed;
+                }
+            }
+            catch { }
+
+            try
+            {
+                // Fallback to UTF-8
+                var content = File.ReadAllText(portFile, Encoding.UTF8);
+                return content.Trim('\0', ' ', '\r', '\n', '\t');
+            }
+            catch { }
+
+            try
+            {
+                // Last resort - default encoding
+                var content = File.ReadAllText(portFile);
+                return content.Trim('\0', ' ', '\r', '\n', '\t');
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Error reading port file: {ex.Message}");
+                return null;
+            }
         }
 
         private string GetDatabaseName(int port)
@@ -86,86 +142,22 @@ namespace PowerBIPortWrapper.Services
                 {
                     connection.Open();
 
-                    // Query for databases using GetSchemaDataSet
-                    var schemaTable = connection.GetSchemaDataSet("DBSCHEMA_CATALOGS", null);
+                    // Query the catalog to get database name
+                    var cmd = connection.CreateCommand();
+                    cmd.CommandText = "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS";
 
-                    if (schemaTable != null && schemaTable.Tables.Count > 0 && schemaTable.Tables[0].Rows.Count > 0)
+                    using (var reader = cmd.ExecuteReader())
                     {
-                        // Get the first database name (CATALOG_NAME column)
-                        return schemaTable.Tables[0].Rows[0]["CATALOG_NAME"].ToString();
+                        if (reader.Read())
+                        {
+                            return reader.GetString(0);
+                        }
                     }
                 }
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine($"Error getting database name for port {port}: {ex.Message}");
-            }
-
-            return null;
-        }
-
-        private int? ReadPortFromFile(string portFile)
-        {
-            // Try multiple times with different encodings and wait a bit
-            for (int attempt = 0; attempt < 3; attempt++)
-            {
-                try
-                {
-                    // Wait a bit to ensure file is fully written
-                    if (attempt > 0)
-                    {
-                        System.Threading.Thread.Sleep(100);
-                    }
-
-                    // Try reading with different methods
-                    string portText = null;
-
-                    // Method 1: ReadAllText with UTF8
-                    try
-                    {
-                        portText = File.ReadAllText(portFile, System.Text.Encoding.UTF8);
-                    }
-                    catch { }
-
-                    // Method 2: ReadAllText with Default encoding
-                    if (string.IsNullOrWhiteSpace(portText))
-                    {
-                        try
-                        {
-                            portText = File.ReadAllText(portFile, System.Text.Encoding.Default);
-                        }
-                        catch { }
-                    }
-
-                    // Method 3: ReadAllBytes and convert
-                    if (string.IsNullOrWhiteSpace(portText))
-                    {
-                        try
-                        {
-                            var bytes = File.ReadAllBytes(portFile);
-                            portText = System.Text.Encoding.ASCII.GetString(bytes);
-                        }
-                        catch { }
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(portText))
-                    {
-                        // Clean up the text - remove any non-numeric characters except digits
-                        portText = new string(portText.Where(c => char.IsDigit(c)).ToArray());
-
-                        if (!string.IsNullOrEmpty(portText) && int.TryParse(portText, out int port))
-                        {
-                            if (port > 1024 && port < 65536) // Validate port range
-                            {
-                                return port;
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"Attempt {attempt + 1} failed: {ex.Message}");
-                }
             }
 
             return null;

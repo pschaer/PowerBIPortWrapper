@@ -6,7 +6,6 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.AnalysisServices.AdomdClient;
 
 namespace PowerBIPortWrapper.Services
 {
@@ -47,7 +46,8 @@ namespace PowerBIPortWrapper.Services
                 _isRunning = true;
 
                 Log($"XMLA Proxy started on port {listenPort}");
-                Log($"Forwarding to port {targetPort}, database: {targetDatabase}");
+                Log($"Forwarding to port {targetPort}");
+                Log($"Target database: {targetDatabase}");
                 Log($"Network access: {(allowRemote ? "Enabled" : "Localhost only")}");
 
                 _ = Task.Run(() => AcceptClientsAsync(_cancellationTokenSource.Token));
@@ -113,6 +113,9 @@ namespace PowerBIPortWrapper.Services
                 using (client)
                 {
                     target = new TcpClient();
+                    target.NoDelay = true;
+                    client.NoDelay = true;
+
                     await target.ConnectAsync("localhost", _targetPort);
                     Log($"Established connection to target port {_targetPort}");
 
@@ -121,9 +124,11 @@ namespace PowerBIPortWrapper.Services
                         var clientStream = client.GetStream();
                         var targetStream = target.GetStream();
 
-                        // Intercept and rewrite XMLA messages
-                        var clientToTarget = InterceptAndForwardAsync(clientStream, targetStream, true, cancellationToken);
-                        var targetToClient = InterceptAndForwardAsync(targetStream, clientStream, false, cancellationToken);
+                        // Intercept client->target (rewrite database references)
+                        var clientToTarget = InterceptXmlaAsync(clientStream, targetStream, true, cancellationToken);
+
+                        // Forward target->client (no rewriting needed)
+                        var targetToClient = InterceptXmlaAsync(targetStream, clientStream, false, cancellationToken);
 
                         await Task.WhenAny(clientToTarget, targetToClient);
                         Log("Client disconnected");
@@ -143,43 +148,54 @@ namespace PowerBIPortWrapper.Services
             }
         }
 
-        private async Task InterceptAndForwardAsync(NetworkStream source, NetworkStream destination,
+        private async Task InterceptXmlaAsync(NetworkStream source, NetworkStream destination,
             bool rewriteDatabase, CancellationToken cancellationToken)
         {
             byte[] buffer = new byte[8192];
-            var messageBuffer = new MemoryStream();
 
             try
             {
-                while (true)
+                while (!cancellationToken.IsCancellationRequested)
                 {
                     int bytesRead = await source.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
                     if (bytesRead == 0) break;
 
+                    byte[] dataToSend = buffer;
+                    int lengthToSend = bytesRead;
+
                     if (rewriteDatabase)
                     {
-                        // Accumulate data to detect complete XMLA messages
-                        messageBuffer.Write(buffer, 0, bytesRead);
+                        // Try to detect and rewrite XMLA messages
+                        // XMLA protocol sends messages with format: [4-byte length][payload]
+                        // But we'll use a simpler approach: detect XML and rewrite it
 
-                        // Try to process if we have XML-like content
-                        string content = Encoding.UTF8.GetString(messageBuffer.ToArray());
-
-                        if (content.Contains("</Envelope>") || content.Contains("</SOAP-ENV:Envelope>"))
+                        try
                         {
-                            // We have a complete SOAP message, rewrite it
-                            string rewritten = RewriteDatabaseReferences(content);
-                            byte[] rewrittenBytes = Encoding.UTF8.GetBytes(rewritten);
+                            // Check if this chunk contains XML
+                            string content = Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
-                            await destination.WriteAsync(rewrittenBytes, 0, rewrittenBytes.Length, cancellationToken);
-                            await destination.FlushAsync(cancellationToken);
+                            if (content.Contains("<DatabaseID>") ||
+                                content.Contains("<CatalogName>") ||
+                                content.Contains("<Catalog>") ||
+                                content.Contains("Initial Catalog="))
+                            {
+                                string rewritten = RewriteDatabaseReferences(content);
 
-                            messageBuffer.SetLength(0); // Clear buffer
-                            continue;
+                                if (rewritten != content)
+                                {
+                                    dataToSend = Encoding.UTF8.GetBytes(rewritten);
+                                    lengthToSend = dataToSend.Length;
+                                    Log($"Rewrote database reference in message");
+                                }
+                            }
+                        }
+                        catch
+                        {
+                            // If rewriting fails, send original data
                         }
                     }
 
-                    // Forward as-is if not rewriting or incomplete message
-                    await destination.WriteAsync(buffer, 0, bytesRead, cancellationToken);
+                    await destination.WriteAsync(dataToSend, 0, lengthToSend, cancellationToken);
                     await destination.FlushAsync(cancellationToken);
                 }
             }
@@ -194,26 +210,36 @@ namespace PowerBIPortWrapper.Services
 
         private string RewriteDatabaseReferences(string xmlContent)
         {
-            // Replace any database GUID with our target database
-            // This handles various XMLA formats
+            string original = xmlContent;
 
-            // Pattern 1: <DatabaseID>guid</DatabaseID>
+            // Pattern 1: <DatabaseID>any-guid-or-name</DatabaseID>
             xmlContent = Regex.Replace(xmlContent,
-                @"<DatabaseID>[a-fA-F0-9\-]+</DatabaseID>",
+                @"<DatabaseID>[^<]+</DatabaseID>",
                 $"<DatabaseID>{_targetDatabase}</DatabaseID>",
                 RegexOptions.IgnoreCase);
 
-            // Pattern 2: CatalogName attribute
+            // Pattern 2: <CatalogName>any-name</CatalogName>
             xmlContent = Regex.Replace(xmlContent,
-                @"CatalogName\s*=\s*['""][a-fA-F0-9\-]+['""]",
-                $"CatalogName=\"{_targetDatabase}\"",
+                @"<CatalogName>[^<]+</CatalogName>",
+                $"<CatalogName>{_targetDatabase}</CatalogName>",
                 RegexOptions.IgnoreCase);
 
-            // Pattern 3: Catalog in connection string
+            // Pattern 3: <Catalog>name</Catalog>
             xmlContent = Regex.Replace(xmlContent,
-                @"(Initial\s+Catalog|Database)\s*=\s*[a-fA-F0-9\-]+",
+                @"<Catalog>[^<]+</Catalog>",
+                $"<Catalog>{_targetDatabase}</Catalog>",
+                RegexOptions.IgnoreCase);
+
+            // Pattern 4: Initial Catalog= in connection strings
+            xmlContent = Regex.Replace(xmlContent,
+                @"Initial\s+Catalog\s*=\s*[^;""<>\s]+",
                 $"Initial Catalog={_targetDatabase}",
                 RegexOptions.IgnoreCase);
+
+            if (original != xmlContent)
+            {
+                Log($"Rewrote database name to: {_targetDatabase}");
+            }
 
             return xmlContent;
         }

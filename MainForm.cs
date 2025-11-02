@@ -168,8 +168,6 @@ namespace PowerBIPortWrapper
                 LogMessage($"Target database: {_selectedInstance.DatabaseName}");
 
                 bool allowRemote = checkBoxNetworkAccess.Checked;
-
-                // Correct parameter order: listenPort, targetPort, targetDatabase, allowRemote
                 await _proxyService.StartAsync(fixedPort, _selectedInstance.Port, _selectedInstance.DatabaseName, allowRemote);
 
                 UpdateStatus("Running", true);
@@ -177,10 +175,15 @@ namespace PowerBIPortWrapper
 
                 MessageBox.Show(
                     $"Proxy started successfully!\n\n" +
-                    $"Forwarding: localhost:{fixedPort} → localhost:{_selectedInstance.Port}\n" +
-                    $"Database: {_selectedInstance.DatabaseName}\n" +
-                    $"Network Access: {(allowRemote ? "Enabled" : "Disabled")}\n\n" +
-                    $"Connection String: Data Source=localhost:{fixedPort};Initial Catalog=PowerBI",
+                    $"Server: localhost:{fixedPort}\n" +
+                    $"Target Database: {_selectedInstance.DatabaseName}\n\n" +
+                    $"You can connect with ANY database name - it will be automatically\n" +
+                    $"rewritten to the correct Power BI database.\n\n" +
+                    $"Suggested connection strings:\n" +
+                    $"• Data Source=localhost:{fixedPort};Initial Catalog=PowerBI\n" +
+                    $"• Data Source=localhost:{fixedPort};Initial Catalog=Model\n" +
+                    $"• Data Source=localhost:{fixedPort} (no catalog specified)\n\n" +
+                    $"Network Access: {(allowRemote ? "Enabled" : "Disabled")}",
                     "Proxy Started",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information
@@ -233,6 +236,17 @@ namespace PowerBIPortWrapper
 
         private void ListBoxInstances_SelectedIndexChanged(object sender, EventArgs e)
         {
+            // Prevent changing selection while proxy is running
+            if (_proxyService != null && _proxyService.IsRunning)
+            {
+                // Revert to the selected instance
+                if (_selectedInstance != null)
+                {
+                    listBoxInstances.SelectedItem = _selectedInstance;
+                }
+                return;
+            }
+
             if (listBoxInstances.SelectedItem is PowerBIInstance instance)
             {
                 _selectedInstance = instance;
@@ -248,8 +262,15 @@ namespace PowerBIPortWrapper
         {
             if (int.TryParse(textBoxFixedPort.Text, out int port))
             {
-                // Show a simplified connection string
-                textBoxConnectionString.Text = $"Data Source=localhost:{port};Initial Catalog=PowerBI";
+                if (_selectedInstance != null && !string.IsNullOrEmpty(_selectedInstance.DatabaseName))
+                {
+                    // Show the ACTUAL database name for testing
+                    textBoxConnectionString.Text = $"Data Source=localhost:{port};Initial Catalog={_selectedInstance.DatabaseName}";
+                }
+                else
+                {
+                    textBoxConnectionString.Text = $"Data Source=localhost:{port}";
+                }
             }
         }
 
@@ -266,6 +287,8 @@ namespace PowerBIPortWrapper
             textBoxFixedPort.Enabled = !isRunning;
             checkBoxNetworkAccess.Enabled = !isRunning;
             textBoxNetworkPort.Enabled = !isRunning && checkBoxNetworkAccess.Checked;
+
+            // Simply disable the listbox - accept default Windows appearance
             listBoxInstances.Enabled = !isRunning;
         }
 
@@ -330,28 +353,38 @@ namespace PowerBIPortWrapper
                     debugInfo.AppendLine($"  Last Modified: {Directory.GetLastWriteTime(dir)}");
 
                     var portFile = Path.Combine(dir, @"Data\msmdsrv.port.txt");
+                    debugInfo.AppendLine($"  Port File Path: {portFile}");
                     debugInfo.AppendLine($"  Port File Exists: {File.Exists(portFile)}");
 
                     if (File.Exists(portFile))
                     {
                         try
                         {
-                            var portContent = File.ReadAllText(portFile);
-                            debugInfo.AppendLine($"  Port Content: '{portContent}'");
+                            var portBytes = File.ReadAllBytes(portFile);
+                            debugInfo.AppendLine($"  Port File Size: {portBytes.Length} bytes");
+                            debugInfo.AppendLine($"  Port Content (hex): {BitConverter.ToString(portBytes)}");
 
-                            if (int.TryParse(portContent.Trim(), out int port))
+                            // Only show UTF-16 (the actual encoding used)
+                            var utf16Content = System.Text.Encoding.Unicode.GetString(portBytes).Trim('\0', ' ', '\r', '\n', '\t');
+                            debugInfo.AppendLine($"  Port Content (UTF-16): '{utf16Content}'");
+
+                            string portContent = utf16Content;
+
+                            if (int.TryParse(portContent, out int port))
                             {
-                                debugInfo.AppendLine($"  Port (parsed): {port}");
+                                debugInfo.AppendLine($"  ✓ Port parsed successfully: {port}");
 
                                 // Try to get database name
                                 try
                                 {
                                     string connStr = $"Data Source=localhost:{port};";
+                                    debugInfo.AppendLine($"  Attempting connection: {connStr}");
+
                                     using (var conn = new Microsoft.AnalysisServices.AdomdClient.AdomdConnection(connStr))
                                     {
                                         conn.Open();
+                                        debugInfo.AppendLine($"  ✓ Connection opened successfully!");
 
-                                        // Query the catalog to get database names
                                         var cmd = conn.CreateCommand();
                                         cmd.CommandText = "SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS";
 
@@ -367,24 +400,34 @@ namespace PowerBIPortWrapper
 
                                             if (dbCount == 0)
                                             {
-                                                debugInfo.AppendLine($"  No databases found");
+                                                debugInfo.AppendLine($"  ⚠ No databases found");
                                             }
                                             else
                                             {
-                                                debugInfo.AppendLine($"  Total databases: {dbCount}");
+                                                debugInfo.AppendLine($"  ✓ Total databases: {dbCount}");
                                             }
                                         }
                                     }
                                 }
                                 catch (Exception dbEx)
                                 {
-                                    debugInfo.AppendLine($"  Error getting database: {dbEx.Message}");
+                                    debugInfo.AppendLine($"  ✗ Error connecting/querying database:");
+                                    debugInfo.AppendLine($"    {dbEx.GetType().Name}: {dbEx.Message}");
+                                    if (dbEx.InnerException != null)
+                                    {
+                                        debugInfo.AppendLine($"    Inner: {dbEx.InnerException.Message}");
+                                    }
                                 }
+                            }
+                            else
+                            {
+                                debugInfo.AppendLine($"  ✗ ERROR: Could not parse port number from: '{portContent}'");
                             }
                         }
                         catch (Exception ex)
                         {
-                            debugInfo.AppendLine($"  Error reading port: {ex.Message}");
+                            debugInfo.AppendLine($"  ✗ Error reading port file:");
+                            debugInfo.AppendLine($"    {ex.GetType().Name}: {ex.Message}");
                         }
                     }
                     else
@@ -393,7 +436,7 @@ namespace PowerBIPortWrapper
                         if (Directory.Exists(dataFolder))
                         {
                             var files = Directory.GetFiles(dataFolder);
-                            debugInfo.AppendLine($"  Files in Data folder: {files.Length}");
+                            debugInfo.AppendLine($"  Data folder exists with {files.Length} files:");
                             foreach (var file in files)
                             {
                                 debugInfo.AppendLine($"    - {Path.GetFileName(file)}");
@@ -401,19 +444,44 @@ namespace PowerBIPortWrapper
                         }
                         else
                         {
-                            debugInfo.AppendLine($"  Data folder doesn't exist");
+                            debugInfo.AppendLine($"  ✗ Data folder doesn't exist!");
                         }
                     }
+                    debugInfo.AppendLine();
+                    debugInfo.AppendLine("=".PadRight(70, '='));
                     debugInfo.AppendLine();
                 }
             }
 
-            // Show in a scrollable message box
-            var form = new Form
+            debugInfo.AppendLine();
+            debugInfo.AppendLine("DETECTOR TEST:");
+            debugInfo.AppendLine("=".PadRight(70, '='));
+
+            var instances = _detector.DetectRunningInstances();
+            debugInfo.AppendLine($"Detector found {instances.Count} instance(s):");
+
+            if (instances.Count == 0)
+            {
+                debugInfo.AppendLine("  ✗ No instances detected!");
+            }
+            else
+            {
+                foreach (var instance in instances)
+                {
+                    debugInfo.AppendLine($"  ✓ {instance.FileName}");
+                    debugInfo.AppendLine($"    Port: {instance.Port}");
+                    debugInfo.AppendLine($"    Database: {instance.DatabaseName ?? "(null)"}");
+                    debugInfo.AppendLine($"    WorkspaceId: {instance.WorkspaceId}");
+                    debugInfo.AppendLine();
+                }
+            }
+
+            // Create and show the debug form
+            var debugForm = new Form
             {
                 Text = "Debug Information",
-                Width = 600,
-                Height = 400,
+                Width = 750,
+                Height = 550,
                 StartPosition = FormStartPosition.CenterParent
             };
 
@@ -423,11 +491,28 @@ namespace PowerBIPortWrapper
                 ScrollBars = ScrollBars.Both,
                 Dock = DockStyle.Fill,
                 Text = debugInfo.ToString(),
-                Font = new System.Drawing.Font("Consolas", 9)
+                Font = new System.Drawing.Font("Consolas", 8.5f),
+                WordWrap = false
             };
 
-            form.Controls.Add(textBox);
-            form.ShowDialog();
+            var copyButton = new Button
+            {
+                Text = "Copy to Clipboard",
+                Dock = DockStyle.Bottom,
+                Height = 30
+            };
+
+            copyButton.Click += (s, ev) =>
+            {
+                Clipboard.SetText(debugInfo.ToString());
+                MessageBox.Show("Debug info copied to clipboard!", "Copied", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            };
+
+            debugForm.Controls.Add(textBox);
+            debugForm.Controls.Add(copyButton);
+
+            // Show as modal dialog - should only show once
+            debugForm.ShowDialog(this);
         }
     }
 }
