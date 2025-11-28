@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace PowerBIPortWrapper.Models
+namespace PBIPortWrapper.Models
 {
     public class PowerBIInstance
     {
@@ -10,6 +10,8 @@ namespace PowerBIPortWrapper.Models
         public string DatabaseName { get; set; }
         public DateTime LastModified { get; set; }
         public string WorkspaceId { get; set; }
+        public int ProcessId { get; set; }
+        public int ParentProcessId { get; set; }
 
         public override string ToString()
         {

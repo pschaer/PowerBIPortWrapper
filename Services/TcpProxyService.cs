@@ -4,7 +4,7 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace PowerBIPortWrapper.Services
+namespace PBIPortWrapper.Services
 {
     public class TcpProxyService : IDisposable
     {
@@ -22,8 +22,9 @@ namespace PowerBIPortWrapper.Services
 
         public event EventHandler<string> OnLog;
         public event EventHandler<string> OnError;
+        public event EventHandler<int> OnConnectionCountChanged;
 
-        public async Task StartAsync(int listenPort, int targetPort, bool allowRemote = false)
+        public async Task StartAsync(int listenPort, int targetPort, bool allowNetworkAccess)
         {
             if (_isRunning)
             {
@@ -37,7 +38,7 @@ namespace PowerBIPortWrapper.Services
 
             try
             {
-                var ipAddress = allowRemote ? IPAddress.Any : IPAddress.Loopback;
+                var ipAddress = allowNetworkAccess ? IPAddress.Any : IPAddress.Loopback;
 
                 _listener = new TcpListener(ipAddress, listenPort);
                 _listener.Start();
@@ -45,7 +46,7 @@ namespace PowerBIPortWrapper.Services
 
                 Log($"TCP Proxy started on port {listenPort}");
                 Log($"Forwarding to localhost:{targetPort}");
-                Log($"Network access: {(allowRemote ? "Enabled (accessible from network)" : "Disabled (localhost only)")}");
+                Log($"Network access: {(allowNetworkAccess ? "Enabled (accessible from network)" : "Disabled (localhost only)")}");
 
                 _ = Task.Run(() => AcceptClientsAsync(_cancellationTokenSource.Token));
             }
@@ -85,6 +86,7 @@ namespace PowerBIPortWrapper.Services
                 {
                     var client = await _listener.AcceptTcpClientAsync();
                     Interlocked.Increment(ref _activeConnections);
+                    OnConnectionCountChanged?.Invoke(this, _activeConnections);
                     Log($"Client connected from {client.Client.RemoteEndPoint} (Active: {_activeConnections})");
 
                     _ = Task.Run(() => HandleClientAsync(client, cancellationToken), cancellationToken);
@@ -143,6 +145,7 @@ namespace PowerBIPortWrapper.Services
             finally
             {
                 Interlocked.Decrement(ref _activeConnections);
+                OnConnectionCountChanged?.Invoke(this, _activeConnections);
                 Log($"Client disconnected (Active: {_activeConnections})");
                 target?.Dispose();
             }

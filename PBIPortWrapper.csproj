@@ -7,12 +7,12 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 
 		<!-- Version Information -->
-		<Version>0.1.0</Version>
-		<AssemblyVersion>0.1.0.0</AssemblyVersion>
-		<FileVersion>0.1.0.0</FileVersion>
+		<Version>0.2.0</Version>
+		<AssemblyVersion>0.2.0.0</AssemblyVersion>
+		<FileVersion>0.2.0.0</FileVersion>
 
 		<!-- Product Information -->
-		<Product>Power BI Port Wrapper</Product>
+		<Product>PBI Port Wrapper</Product>
 		<Description>TCP port forwarding proxy for Power BI Desktop, providing stable port access for external tools</Description>
 		<Authors>Pascal Schär</Authors>
 		<Copyright>Copyright © 2025 Pascal Schär. Licensed under MIT License.</Copyright>
@@ -21,5 +21,6 @@
 	<ItemGroup>
 		<PackageReference Include="Microsoft.AnalysisServices.AdomdClient" Version="19.106.1" />
 		<PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+		<PackageReference Include="System.Management" Version="10.0.0" />
 	</ItemGroup>
 </Project>
